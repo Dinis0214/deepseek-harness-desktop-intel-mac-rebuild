@@ -95,17 +95,11 @@ jobs:
       FORCE_REBUILD: ${{ needs.discover.outputs.force_rebuild }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Checkout rebuild orchestration repository
-        uses: actions/checkout@v4
-        with:
-          path: rebuild-repo
-
       - name: Checkout upstream source
         uses: actions/checkout@v4
         with:
           repository: deepseek-ai/deepseek-harness
           ref: ${{ needs.discover.outputs.upstream_tag }}
-          path: dsh-source
           fetch-depth: 1
 
       - name: Setup Node.js & pnpm
@@ -116,37 +110,22 @@ jobs:
         with:
           node-version: 22
           cache: 'pnpm'
-          cache-dependency-path: dsh-source/pnpm-lock.yaml
-
-      - name: Apply stability patches
-        working-directory: dsh-source
-        run: |
-          set -euo pipefail
-          echo "Applying system stability patches..."
-          for patch in ../rebuild-repo/patches/*.patch; do
-            if [ -f "$patch" ]; then
-              echo "Applying $(basename "$patch")..."
-              git apply "$patch" || git apply --3way "$patch"
-            fi
-          done
-          echo "All stability patches applied successfully."
 
       - name: Install dependencies
-        working-directory: dsh-source
         run: pnpm install --no-frozen-lockfile
 
       - name: Build unsigned Intel macOS packages
-        working-directory: dsh-source/apps/desktop
+        working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
           set -euo pipefail
-          echo "Building Intel macOS desktop target..."
+          echo "Building Intel macOS desktop target directly from official upstream source..."
           pnpm run package:mac:x64:unsigned
 
       - name: Validate x86_64 packages and write checksums
         id: validate
-        working-directory: dsh-source/apps/desktop
+        working-directory: apps/desktop
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -179,7 +158,7 @@ jobs:
           echo "assets_ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Publish Intel macOS Release
-        working-directory: dsh-source/apps/desktop/dist-assets
+        working-directory: apps/desktop/dist-assets
         run: |
           set -euo pipefail
           if [[ "$FORCE_REBUILD" == "true" ]] && gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -192,7 +171,7 @@ jobs:
           printf 'Community-built Intel (`x86_64`) macOS packages for [DeepSeek Harness](%s).\n\n' "$UPSTREAM_URL" >> "$notes_file"
           printf '- **Upstream Tag**: `%s`\n' "$UPSTREAM_TAG" >> "$notes_file"
           printf '- **Target Architecture**: macOS Intel (`x86_64`, macOS 12+)\n' >> "$notes_file"
-          printf '- **Packaging Mode**: Unsigned & Notarization Skipped (Community Rebuild)\n\n' >> "$notes_file"
+          printf '- **Packaging Mode**: Unsigned & Notarization Skipped (Official Clean Rebuild)\n\n' >> "$notes_file"
           printf '## Gatekeeper Notice\n' >> "$notes_file"
           printf 'These community packages are **not signed or notarized by Apple**, so macOS may block the first launch.\n' >> "$notes_file"
           printf 'Right-click `DeepSeek Harness.app`, choose **Open**, and confirm the prompt.\n\n' >> "$notes_file"

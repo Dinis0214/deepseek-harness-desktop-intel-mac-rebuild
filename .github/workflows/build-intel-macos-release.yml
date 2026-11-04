@@ -126,7 +126,7 @@ jobs:
           for patch in ../rebuild-repo/patches/*.patch; do
             if [ -f "$patch" ]; then
               echo "Applying $(basename "$patch")..."
-              git apply "$patch"
+              git apply "$patch" || git apply --3way "$patch"
             fi
           done
           echo "All stability patches applied successfully."

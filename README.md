@@ -65,6 +65,12 @@ The GitHub Actions workflow checks every six hours for the latest upstream [Deep
 
 ---
 
+## 🙏 Acknowledgements & Inspiration
+
+This automated build workflow is inspired by and references the implementation of [evencj11/hermes-agent-desktop-intel-mac-rebuild](https://github.com/evencj11/hermes-agent-desktop-intel-mac-rebuild), which pioneered community-driven automated Intel macOS desktop packaging pipelines using GitHub Actions.
+
+---
+
 ## 📜 License
 
 DeepSeek Harness is distributed under the [MIT License](LICENSE).

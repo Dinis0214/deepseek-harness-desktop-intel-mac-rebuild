@@ -1,0 +1,194 @@
+name: Build Intel macOS desktop release
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Force rebuild even if release tag already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dsh-intel-macos-build
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Check latest upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+      upstream_url: ${{ steps.check.outputs.upstream_url }}
+      force_rebuild: ${{ steps.check.outputs.force_rebuild }}
+    steps:
+      - name: Discover upstream release
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          upstream_json="$(gh api repos/deepseek-ai/deepseek-harness/releases/latest)"
+          upstream_tag="$(jq -r '.tag_name' <<<"$upstream_json")"
+          upstream_url="$(jq -r '.html_url' <<<"$upstream_json")"
+          release_tag="intel-macos-${upstream_tag//\//-}"
+          force_rebuild="${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild }}"
+
+          if [[ -z "$upstream_tag" || "$upstream_tag" == "null" ]]; then
+            echo "The upstream latest release has no tag." >&2
+            exit 1
+          fi
+
+          {
+            echo "upstream_tag=$upstream_tag"
+            echo "upstream_url=$upstream_url"
+            echo "release_tag=$release_tag"
+            echo "force_rebuild=$force_rebuild"
+          } >> "$GITHUB_OUTPUT"
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [[ "$force_rebuild" == "true" ]]; then
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+              echo "Release $release_tag already exists; force rebuild requested."
+            else
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+              echo "Release $release_tag already exists; nothing to build."
+            fi
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "New upstream release detected: $upstream_tag"
+          fi
+
+  build-and-publish:
+    name: Build & publish Intel macOS artifacts
+    needs: discover
+    if: needs.discover.outputs.should_build == 'true'
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    env:
+      UPSTREAM_TAG: ${{ needs.discover.outputs.upstream_tag }}
+      UPSTREAM_URL: ${{ needs.discover.outputs.upstream_url }}
+      RELEASE_TAG: ${{ needs.discover.outputs.release_tag }}
+      FORCE_REBUILD: ${{ needs.discover.outputs.force_rebuild }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout rebuild orchestration repository
+        uses: actions/checkout@v4
+        with:
+          path: rebuild-repo
+
+      - name: Checkout upstream source
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ needs.discover.outputs.upstream_tag }}
+          path: dsh-source
+          fetch-depth: 1
+
+      - name: Setup Node.js & pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: dsh-source/pnpm-lock.yaml
+
+      - name: Apply stability patches
+        working-directory: dsh-source
+        run: |
+          set -euo pipefail
+          echo "Applying system stability patches..."
+          for patch in ../rebuild-repo/patches/*.patch; do
+            if [ -f "$patch" ]; then
+              echo "Applying $(basename "$patch")..."
+              git apply "$patch"
+            fi
+          done
+          echo "All stability patches applied successfully."
+
+      - name: Install dependencies
+        working-directory: dsh-source
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned Intel macOS packages
+        working-directory: dsh-source/apps/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: |
+          set -euo pipefail
+          echo "Building Intel macOS desktop target..."
+          pnpm run package:mac:x64:unsigned
+
+      - name: Validate x86_64 packages and write checksums
+        id: validate
+        working-directory: dsh-source/apps/desktop
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          app_binary="$(find .desktop-build/artifacts -path '*/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' -type f -print -quit 2>/dev/null || true)"
+          if [[ -z "$app_binary" ]]; then
+            app_binary="$(find release -path '*/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' -type f -print -quit 2>/dev/null || true)"
+          fi
+
+          if [[ -n "$app_binary" ]]; then
+            app_file="$(file "$app_binary")"
+            echo "Executable verification: $app_file"
+            grep -q 'x86_64' <<<"$app_file"
+            if grep -q 'arm64' <<<"$app_file"; then
+              echo "Error: Application binary unexpectedly contains arm64 architecture!" >&2
+              exit 1
+            fi
+          fi
+
+          mkdir -p dist-assets
+          find .desktop-build/artifacts release -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} dist-assets/ \; 2>/dev/null || true
+
+          cd dist-assets
+          for dmg in *.dmg; do
+            if [ -f "$dmg" ]; then
+              echo "Verifying DMG integrity: $dmg"
+              hdiutil verify "$dmg"
+            fi
+          done
+
+          shasum -a 256 * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "assets_ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Intel macOS Release
+        working-directory: dsh-source/apps/desktop/dist-assets
+        run: |
+          set -euo pipefail
+          if [[ "$FORCE_REBUILD" == "true" ]] && gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Deleting existing release for force rebuild: $RELEASE_TAG"
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          printf '# DeepSeek Harness Desktop for Intel macOS (Unofficial)\n\n' > "$notes_file"
+          printf 'Community-built Intel (`x86_64`) macOS packages for [DeepSeek Harness](%s).\n\n' "$UPSTREAM_URL" >> "$notes_file"
+          printf '- **Upstream Tag**: `%s`\n' "$UPSTREAM_TAG" >> "$notes_file"
+          printf '- **Target Architecture**: macOS Intel (`x86_64`, macOS 12+)\n' >> "$notes_file"
+          printf '- **Packaging Mode**: Unsigned & Notarization Skipped (Community Rebuild)\n\n' >> "$notes_file"
+          printf '## Gatekeeper Notice\n' >> "$notes_file"
+          printf 'These community packages are **not signed or notarized by Apple**, so macOS may block the first launch.\n' >> "$notes_file"
+          printf 'Right-click `DeepSeek Harness.app`, choose **Open**, and confirm the prompt.\n\n' >> "$notes_file"
+          printf 'Alternatively, run the following command in Terminal:\n' >> "$notes_file"
+          printf '```bash\nxattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"\n```\n\n' >> "$notes_file"
+          printf 'SHA-256 hashes are included in `SHA256SUMS.txt`.\n' >> "$notes_file"
+
+          gh release create "$RELEASE_TAG" \
+            * \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "DeepSeek Harness Desktop for Intel macOS - $UPSTREAM_TAG" \
+            --notes-file "$notes_file" \
+            --latest

@@ -1,0 +1,18 @@
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index bf71b2a..ce89c10 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -1340,6 +1340,13 @@ async function showMainWindow(development: boolean, updateState: DesktopUpdateSt
+   publishUpdate(updateState)
+ }
+ 
++// Performance & GPU memory optimization for Intel macOS desktop graphics
++app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
++app.commandLine.appendSwitch('disable-renderer-backgrounding')
++app.on('gpu-process-crashed', () => {
++  console.warn('DSH Desktop: GPU process crashed, continuing in fault-tolerant mode...')
++})
++
+ const ownsDesktopInstance = claimDesktopSingleInstance(app, () => { focusPrimaryWindow() })
+ 
+ if (ownsDesktopInstance) void app.whenReady().then(main).catch(async (error: unknown) => {

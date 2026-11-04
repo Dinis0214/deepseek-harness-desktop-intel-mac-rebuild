@@ -5,6 +5,10 @@ on:
     - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
+      target_tag:
+        description: "Specify upstream release tag (leave blank for latest)"
+        type: string
+        default: ""
       force_rebuild:
         description: "Force rebuild even if release tag already exists"
         type: boolean
@@ -34,16 +38,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          upstream_json="$(gh api repos/deepseek-ai/deepseek-harness/releases/latest)"
-          upstream_tag="$(jq -r '.tag_name' <<<"$upstream_json")"
-          upstream_url="$(jq -r '.html_url' <<<"$upstream_json")"
-          release_tag="intel-macos-${upstream_tag//\//-}"
-          force_rebuild="${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild }}"
+          target_tag="${{ github.event_name == 'workflow_dispatch' && inputs.target_tag || '' }}"
+          force_rebuild="${{ github.event_name == 'workflow_dispatch' && inputs.force_rebuild || 'false' }}"
+
+          if [[ -n "$target_tag" ]]; then
+            echo "Manual target tag specified: $target_tag"
+            upstream_tag="$target_tag"
+            upstream_url="https://github.com/deepseek-ai/deepseek-harness/releases/tag/${target_tag}"
+          else
+            echo "Fetching latest upstream release (including pre-releases)..."
+            upstream_json="$(gh api repos/deepseek-ai/deepseek-harness/releases?per_page=1 --jq '.[0]')"
+            upstream_tag="$(jq -r '.tag_name' <<<"$upstream_json")"
+            upstream_url="$(jq -r '.html_url' <<<"$upstream_json")"
+          fi
 
           if [[ -z "$upstream_tag" || "$upstream_tag" == "null" ]]; then
-            echo "The upstream latest release has no tag." >&2
+            echo "Error: Failed to discover an upstream tag." >&2
             exit 1
           fi
+
+          release_tag="intel-macos-${upstream_tag//\//-}"
 
           {
             echo "upstream_tag=$upstream_tag"
@@ -51,6 +65,9 @@ jobs:
             echo "release_tag=$release_tag"
             echo "force_rebuild=$force_rebuild"
           } >> "$GITHUB_OUTPUT"
+
+          echo "Target Upstream Tag: $upstream_tag"
+          echo "Target Release Tag:  $release_tag"
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             if [[ "$force_rebuild" == "true" ]]; then
@@ -116,7 +133,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: dsh-source
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Build unsigned Intel macOS packages
         working-directory: dsh-source/apps/desktop
@@ -134,10 +151,7 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
 
-          app_binary="$(find .desktop-build/artifacts -path '*/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' -type f -print -quit 2>/dev/null || true)"
-          if [[ -z "$app_binary" ]]; then
-            app_binary="$(find release -path '*/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' -type f -print -quit 2>/dev/null || true)"
-          fi
+          app_binary="$(find .desktop-build release -path '*/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' -type f -print -quit 2>/dev/null || true)"
 
           if [[ -n "$app_binary" ]]; then
             app_file="$(file "$app_binary")"
@@ -150,7 +164,7 @@ jobs:
           fi
 
           mkdir -p dist-assets
-          find .desktop-build/artifacts release -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} dist-assets/ \; 2>/dev/null || true
+          find .desktop-build release -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} dist-assets/ \; 2>/dev/null || true
 
           cd dist-assets
           for dmg in *.dmg; do

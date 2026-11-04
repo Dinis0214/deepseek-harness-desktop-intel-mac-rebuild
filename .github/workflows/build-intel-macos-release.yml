@@ -146,6 +146,9 @@ jobs:
           find .desktop-build release -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} dist-assets/ \; 2>/dev/null || true
 
           cd dist-assets
+          echo "Collected release assets:"
+          ls -la
+
           for dmg in *.dmg; do
             if [ -f "$dmg" ]; then
               echo "Verifying DMG integrity: $dmg"
@@ -155,10 +158,11 @@ jobs:
 
           shasum -a 256 * > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          echo "assets_ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Publish Intel macOS Release
         working-directory: apps/desktop/dist-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ "$FORCE_REBUILD" == "true" ]] && gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -180,7 +184,7 @@ jobs:
           printf 'SHA-256 hashes are included in `SHA256SUMS.txt`.\n' >> "$notes_file"
 
           gh release create "$RELEASE_TAG" \
-            * \
+            *.dmg *.zip SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "DeepSeek Harness Desktop for Intel macOS - $UPSTREAM_TAG" \
             --notes-file "$notes_file" \

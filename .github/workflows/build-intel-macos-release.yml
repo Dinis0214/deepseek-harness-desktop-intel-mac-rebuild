@@ -127,7 +127,7 @@ jobs:
           echo "Building Intel macOS desktop target directly from official upstream source..."
           pnpm run package:mac:x64:unsigned
 
-      - name: Validate x86_64 packages and write checksums
+      - name: Validate x86_64 packages and prepare assets
         id: validate
         working-directory: apps/desktop
         run: |
@@ -135,7 +135,6 @@ jobs:
           shopt -s nullglob
 
           app_binary="$(find .desktop-build release -path '*/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness' -type f -print -quit 2>/dev/null || true)"
-
           if [[ -n "$app_binary" ]]; then
             app_file="$(file "$app_binary")"
             echo "Executable verification: $app_file"
@@ -146,56 +145,77 @@ jobs:
             fi
           fi
 
-          mkdir -p dist-assets
-          find .desktop-build release -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} dist-assets/ \; 2>/dev/null || true
+          dmg_path="$(find .desktop-build release -name "*.dmg" -type f -print -quit)"
+          if [[ -z "$dmg_path" ]]; then
+            echo "Error: Packaged DMG was not found!" >&2
+            exit 1
+          fi
 
-          cd dist-assets
-          echo "Collected release assets:"
-          ls -la
+          echo "Verifying DMG integrity: $dmg_path"
+          hdiutil verify "$dmg_path"
 
-          for dmg in *.dmg; do
-            if [ -f "$dmg" ]; then
-              echo "Verifying DMG integrity: $dmg"
-              hdiutil verify "$dmg"
-            fi
-          done
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          cp "$dmg_path" "$RUNNER_TEMP/artifacts/"
+          cd "$RUNNER_TEMP/artifacts"
 
           shasum -a 256 *.dmg > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+          echo "dmg_file=$(ls -1 "$RUNNER_TEMP/artifacts/"*.dmg)" >> "$GITHUB_OUTPUT"
+          echo "checksum_file=$RUNNER_TEMP/artifacts/SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
+
       - name: Publish Intel macOS Release
-        working-directory: apps/desktop/dist-assets
         env:
+          DMG_FILE: ${{ steps.validate.outputs.dmg_file }}
+          CHECKSUM_FILE: ${{ steps.validate.outputs.checksum_file }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
+
           if [[ "$FORCE_REBUILD" == "true" ]] && gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Deleting existing release for force rebuild: $RELEASE_TAG"
             gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
           fi
 
-          notes_file="$RUNNER_TEMP/release-notes.md"
-          printf '# DeepSeek Harness Desktop for Intel macOS (Unofficial)\n\n' > "$notes_file"
-          printf 'Community-built Intel (`x86_64`) macOS packages for [DeepSeek Harness](%s).\n\n' "$UPSTREAM_URL" >> "$notes_file"
-          printf '- **Upstream Tag**: `%s`\n' "$UPSTREAM_TAG" >> "$notes_file"
-          printf '- **Target Architecture**: macOS Intel (`x86_64`, macOS 12+)\n' >> "$notes_file"
-          printf '- **Packaging Mode**: Unsigned & Notarization Skipped (Official Clean Rebuild)\n\n' >> "$notes_file"
-          printf '## Gatekeeper Notice\n' >> "$notes_file"
-          printf 'These community packages are **not signed or notarized by Apple**, so macOS may block the first launch.\n' >> "$notes_file"
-          printf 'Right-click `DeepSeek Harness.app`, choose **Open**, and confirm the prompt.\n\n' >> "$notes_file"
-          printf 'Alternatively, run the following command in Terminal:\n' >> "$notes_file"
-          printf '```bash\nxattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"\n```\n\n' >> "$notes_file"
-          printf 'SHA-256 hashes are included in `SHA256SUMS.txt`.\n' >> "$notes_file"
+          release_notes=$(cat <<EOF
+          ## DeepSeek Harness Desktop for Intel macOS (Unofficial)
 
-          release_assets=(*.dmg SHA256SUMS.txt)
-          if compgen -G "*.zip" > /dev/null; then
-            release_assets+=(*.zip)
+          Community-built Intel (x86_64) macOS packages for [DeepSeek Harness]($UPSTREAM_URL).
+          - Upstream Tag: $UPSTREAM_TAG
+          - Architecture: Intel x86_64 (macOS 12+)
+          - Packaging Mode: Unsigned Ad-hoc (Official Clean Rebuild)
+
+          ### Gatekeeper Notice
+          These community packages are not signed by Apple. If macOS blocks launching:
+          1. Right-click DeepSeek Harness.app and choose Open, or:
+          2. Run in Terminal: xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"
+
+          SHA-256 checksums are verified and recorded in SHA256SUMS.txt.
+          EOF
+          )
+
+          tag_obj_sha="$(
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/git/tags" \
+              -f tag="$RELEASE_TAG" \
+              -f message="Intel macOS rebuild for $UPSTREAM_TAG" \
+              -f object="$GITHUB_SHA" \
+              -f type="commit" \
+              --jq '.sha' 2>/dev/null || true
+          )"
+          if [[ -n "$tag_obj_sha" ]]; then
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$RELEASE_TAG" \
+              -f sha="$tag_obj_sha" >/dev/null 2>&1 || true
           fi
 
           gh release create "$RELEASE_TAG" \
-            "${release_assets[@]}" \
+            "$DMG_FILE" \
+            "$CHECKSUM_FILE" \
             --repo "$GITHUB_REPOSITORY" \
             --title "DeepSeek Harness Desktop for Intel macOS - $UPSTREAM_TAG" \
-            --notes-file "$notes_file" \
+            --notes "$release_notes" \
             --latest
